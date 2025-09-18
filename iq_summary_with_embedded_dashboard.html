@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI-Powered Business Analytics</title>
+    <!-- Luzmo Embed library (for dashboard embedding, but also for e.g. Luzmo IQ Chat) -->
+    <script
+      defer
+      type="module"
+      src="https://cdn.luzmo.com/js/luzmo-embed/6.6.0/luzmo-embed.min.js"
+      charset="utf-8"
+    ></script>
+    <!-- Google Font -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <!-- Font Awesome for icons -->
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+    />
+  </head>
+  <body>
+    <div class="main-container">
+      <!-- Status Section -->
+      <div class="status-section">
+        <div id="statusIndicator" class="status-indicator loading">
+          <div class="icon"><i class="fas fa-hourglass"></i></div>
+          <span>Initializing Insights summary...</span>
+        </div>
+      </div>
+
+      <!-- Summary Section (hidden initially) -->
+      <div id="summarySection" class="summary-section">
+        <div class="summary-content">
+          <div id="responseContainer" class="response-container empty"></div>
+
+          <div
+            id="chartContainer"
+            class="chart-container"
+            style="display: none"
+          ></div>
+        </div>
+      </div>
+      <div id="errorMessage" class="error-message" style="display: none">
+        <div class="icon"><i class="fas fa-exclamation-triangle"></i></div>
+        <span></span>
+      </div>
+
+      <!-- Dashboard Section -->
+      <div class="dashboard-section">
+        <div class="dashboard-header">
+          <div class="icon"><i class="fas fa-chart-line"></i></div>
+          <h2>Interactive Dashboard</h2>
+        </div>
+
+        <div class="dashboard-content">
+          <luzmo-embed-dashboard
+            style="width: 100%; height: 100%; display: block;"
+            appServer="https://app.luzmo.com"
+            apiHost="https://api.luzmo.com"
+            loaderSpinnerColor="rgb(68, 52, 255)"
+          ></luzmo-embed-dashboard>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      /* ********************************************************
+       * 
+       * 
+       * TODOs:
+       *  1. Generate an Embed key-token pair manually (e.g. using the "Embed" button in the dashboard editor)
+       *  2. Replace the hardcoded authKey and authToken in the CONFIG object below
+       *  3. Replace the hardcoded dashboardId in the CONFIG object below
+       *  4. Finetune the BUSINESS_SUMMARY_PROMPT to your needs
+       * 
+       * 
+       * ********************************************************
+      */
+      // Configuration
+      const CONFIG = {
+        // For demo purposes, these are hardcoded into the frontend
+        appServer: "https://app.luzmo.com",
+        apiHost: "https://api.luzmo.com",
+        authKey: "YOUR_EMBED_KEY_HERE",
+        authToken:
+          "YOUR_EMBED_TOKEN_HERE",
+        dashboardId: "YOUR_DASHBOARD_ID_HERE"
+      };
+
+      // Hardcoded prompt optimized for generating a summary for store owners
+      const BUSINESS_SUMMARY_PROMPT = `You are a senior sales-analytics consultant.
+              
+        **Objective**  
+        Analyse individual **store sales performance** from the product orders dataset and surface meaningful insights store owners.
+              
+        **Data preparation steps**
+        Always show insights for each store.
+        Always filter on orders placed in the last 90 days, excluding today, on the actual RFC3339 datetime values ("<=" and ">=" expressions). Use the "order_timestamp" column ID. Always filter from start of the day to end of the day.
+              
+        **Metrics to surface per store**
+        - **'Total Revenue'** - Use the "total_amount" column ID.
+        - **'Profit Margin'** - Use the "Profit Margin" Formula ID.
+        - **'Most popular product per store'** - Use the "product_name" column ID, "store_name" column ID, and the "quantity" column ID. You must run this as a separate query with the same date range filter applied.
+              
+        **Other rules:**
+        - Where relevant, always retrieve names instead of IDs in the data queries (e.g. query "product_name" column ID instead of "product_id", "store_name" column ID instead of "store_id", etc.).
+        - Add a short introduction at the beginning of the output (e.g. "here is a quick overview of your stores' performance"). Include the date range.
+        - Keep the tone business-critical and actionable.
+        - Around store names, use a span HTML tag with the "store-name" HTML class.
+        - Around metric names, use a span HTML tag with the "metric-name" HTML class.
+        - Do not ask for confirmation or clarification. If an issue occurs, just indicate that an unexpected error occurred while generating the summary.
+        - Use the € currency symbol where appropriate.`;
+
+      /* ********************************************************
+       * 
+       * 
+       * Code below is used to render the UI and handle the streaming of the /message request (https://api.luzmo.com/ai/docs/api-docs/#/default/post_message)
+       * This does not need to be modified.
+       * 
+       * 
+       * ********************************************************
+      */
+
+      // Initialize the application
+      document.addEventListener("DOMContentLoaded", () => {
+        // Initialize Luzmo embed dashboard
+        const luzmoEmbed = document.querySelector("luzmo-embed-dashboard");
+        luzmoEmbed.appServer = CONFIG.appServer;
+        luzmoEmbed.apiHost = CONFIG.apiHost;
+        luzmoEmbed.authKey = CONFIG.authKey;
+        luzmoEmbed.authToken = CONFIG.authToken;
+        luzmoEmbed.dashboardId = CONFIG.dashboardId;
+
+        // Initialize chat UI
+        const chatUI = new ChatUI();
+
+        // Auto-generate summary on page load (uncomment to enable)
+        setTimeout(() => {
+          chatUI.generateSummary();
+        }, 1000);
+      });
+
+      // IQ Stream Processor
+      class IQStreamProcessor {
+        constructor(config) {
+          this.config = {
+            apiHost: CONFIG.apiHost,
+            responseMode: "mixed",
+            lang: "en",
+            timezone: "Europe/Brussels",
+            ...config,
+          };
+          this.conversationId = undefined;
+          this.messageBuffers = new Map();
+          this.eventListeners = {};
+        }
+
+        // Event listener management
+        on(event, callback) {
+          this.eventListeners[event] = callback;
+        }
+
+        emit(event, data) {
+          const callback = this.eventListeners[event];
+          if (callback) {
+            callback(data);
+          }
+        }
+
+        // Base64 encode credentials
+        encodeCredentials() {
+          const credentials = `${this.config.authKey}:${this.config.authToken}`;
+          return btoa(credentials);
+        }
+
+        // Parse a single line from the stream
+        parseStreamLine(line) {
+          if (!line.trim()) return null;
+
+          try {
+            return JSON.parse(line);
+          } catch (error) {
+            console.warn("Failed to parse stream line:", line, error);
+            return null;
+          }
+        }
+
+        // Process a parsed chunk
+        processChunk(chunk) {
+          if ("state" in chunk) {
+            this.emit("state", chunk);
+          } else if ("chunk" in chunk) {
+            // Accumulate text chunks
+            const currentText = this.messageBuffers.get(chunk.messageId) || "";
+            this.messageBuffers.set(chunk.messageId, currentText + chunk.chunk);
+            this.emit("textChunk", chunk);
+          } else if ("chart" in chunk) {
+            this.emit("chart", chunk);
+          } else if ("done" in chunk) {
+            this.emit("messageComplete", chunk.messageId);
+            // Clean up completed message buffer
+            this.messageBuffers.delete(chunk.messageId);
+          }
+        }
+
+        // Get complete message text for a given message ID
+        getCompleteMessage(messageId) {
+          return this.messageBuffers.get(messageId);
+        }
+
+        // Main streaming method
+        async streamMessage(message) {
+          const encodedCredentials = this.encodeCredentials();
+          const requestBody = {
+            ...message,
+            conversation_id: this.conversationId,
+            response_mode: this.config.responseMode,
+            lang: this.config.lang,
+            timezone: this.config.timezone,
+          };
+
+          try {
+            const response = await fetch(
+              `${this.config.apiHost}/ai/v1/message`,
+              {
+                method: "POST",
+                headers: {
+                  Authorization: `Basic ${encodedCredentials}`,
+                  "Content-Type": "application/json",
+                  Accept: "text/event-stream",
+                },
+                body: JSON.stringify(requestBody),
+              }
+            );
+
+            if (!response.ok) {
+              throw new Error(
+                `HTTP ${response.status}: ${response.statusText}`
+              );
+            }
+
+            // Update conversation ID from response headers
+            const newConversationId = response.headers.get("X-Conversation-Id");
+            if (newConversationId) {
+              this.conversationId = newConversationId;
+            }
+
+            // Process the stream
+            const reader = response.body?.getReader();
+            if (!reader) {
+              throw new Error("Response body is not readable");
+            }
+
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split("\n");
+
+                // Keep the last incomplete line in the buffer
+                buffer = lines.pop() || "";
+
+                // Process complete lines
+                for (const line of lines) {
+                  const chunk = this.parseStreamLine(line);
+                  if (chunk) {
+                    this.processChunk(chunk);
+                  }
+                }
+              }
+
+              // Process any remaining data in the buffer
+              if (buffer.trim()) {
+                const chunk = this.parseStreamLine(buffer);
+                if (chunk) {
+                  this.processChunk(chunk);
+                }
+              }
+
+              this.emit("complete");
+            } finally {
+              reader.releaseLock();
+            }
+          } catch (error) {
+            this.emit(
+              "error",
+              error instanceof Error ? error : new Error(String(error))
+            );
+          }
+        }
+
+        // Get current conversation ID
+        getConversationId() {
+          return this.conversationId;
+        }
+
+        // Reset conversation
+        resetConversation() {
+          this.conversationId = null;
+          this.messageBuffers.clear();
+        }
+      }
+
+      // UI Management
+      class ChatUI {
+        constructor() {
+          this.processor = new IQStreamProcessor({
+            authKey: CONFIG.authKey,
+            authToken: CONFIG.authToken,
+            responseMode: "text_only",
+            lang: "en",
+            timezone: "Europe/Brussels",
+          });
+
+          // Text accumulation and rendering state
+          this.accumulatedText = "";
+          this.isRendering = false;
+          this.typewriterSpeed = 20; // milliseconds per character - optimized for modern UX
+
+          this.setupEventListeners();
+        }
+
+        setupEventListeners() {
+          // Set up streaming event listeners
+          this.processor.on("state", (state) => {
+            this.updateStatus(state);
+          });
+
+          this.processor.on("textChunk", (chunk) => {
+            this.accumulateText(chunk.chunk);
+          });
+
+          this.processor.on("chart", (chart) => {
+            // Not implemented
+            console.warn("Chart rendering not implemented");
+          });
+
+          this.processor.on("messageComplete", (messageId) => {
+            const completeMessage =
+              this.processor.getCompleteMessage(messageId);
+            console.log(`Message ${messageId} complete:`, completeMessage);
+            // Start rendering the complete accumulated text
+            this.startRendering();
+          });
+
+          this.processor.on("error", (error) => {
+            this.showError(error.message);
+          });
+
+          this.processor.on("complete", () => {
+            this.hideStatus();
+          });
+        }
+
+        async generateSummary() {
+          // Clear previous response
+          this.clearResponse();
+          this.hideError();
+
+          try {
+            await this.processor.streamMessage({
+              prompt: BUSINESS_SUMMARY_PROMPT,
+            });
+          } catch (error) {
+            this.showError(error.message);
+          }
+        }
+
+        updateStatus(state) {
+          const statusIndicator = document.getElementById("statusIndicator");
+          const statusText = state.state;
+          console.log("state", state);
+
+          // Get appropriate icon for status
+          const statusIcons = {
+            loading: "fas fa-hourglass",
+            analyzing: "fas fa-search",
+            querying: "fas fa-database",
+            summarizing: "fas fa-file-alt",
+            "generating-chart": "fas fa-chart-bar",
+            "cannot-answer": "fas fa-exclamation-triangle",
+            completed: "fas fa-check-circle",
+          };
+
+          const statusMessages = {
+            loading: "Loading data...",
+            analyzing: "Analyzing business data...",
+            querying: "Querying database...",
+            summarizing: "Generating insights...",
+            "generating-chart": "Creating visualizations...",
+            "cannot-answer": "Unable to process request",
+            completed: "Analysis complete",
+          };
+
+          const statusKey = state.state.toLowerCase().replace(/\s+/g, "-");
+          const iconClass = statusIcons[statusKey] || "fas fa-info-circle";
+          const message = statusMessages[statusKey] || statusText;
+
+          statusIndicator.className = `status-indicator ${statusKey} active`;
+          statusIndicator.innerHTML = `
+        <div class="icon"><i class="${iconClass}"></i></div>
+        <span>${message}</span>
+      `;
+          statusIndicator.style.display = "flex";
+        }
+
+        hideStatus() {
+          const statusIndicator = document.getElementById("statusIndicator");
+          const statusSection = statusIndicator.closest(".status-section");
+          const summarySection = document.getElementById("summarySection");
+
+          // Hide status section and show summary section
+          statusSection.style.display = "none";
+          summarySection.classList.add("show");
+        }
+
+        // Accumulate text chunks without rendering
+        accumulateText(text) {
+          this.accumulatedText += text;
+        }
+
+        // Start rendering the accumulated text with proper HTML handling
+        startRendering() {
+          if (this.isRendering) return;
+          this.isRendering = true;
+
+          const responseContainer =
+            document.getElementById("responseContainer");
+          responseContainer.innerHTML = "";
+          responseContainer.classList.remove("empty");
+          responseContainer.classList.add("active");
+
+          // Remove HTML tags that fully wrap the entire message
+          const processedText = this.removeFullWrapperTags(
+            this.accumulatedText
+          );
+
+          this.renderTextWithTypewriter(processedText, responseContainer);
+        }
+
+        // Remove HTML tags that fully wrap the entire message
+        removeFullWrapperTags(text) {
+          const trimmedText = text.trim();
+
+          // Check if the text starts and ends with HTML tags
+          if (!trimmedText.startsWith("<") || !trimmedText.endsWith(">")) {
+            return text;
+          }
+
+          // Find the first opening tag
+          const openTagMatch = trimmedText.match(/^<(\w+)(?:\s[^>]*)?>/);
+          if (!openTagMatch) {
+            return text;
+          }
+
+          const tagName = openTagMatch[1];
+          const openTagLength = openTagMatch[0].length;
+
+          // Check if it's a self-closing tag
+          if (openTagMatch[0].endsWith("/>")) {
+            return text; // Don't remove self-closing tags
+          }
+
+          // Check if the text ends with the corresponding closing tag
+          const expectedClosingTag = `</${tagName}>`;
+          if (!trimmedText.endsWith(expectedClosingTag)) {
+            return text;
+          }
+
+          // Extract the content between the tags
+          const contentStart = openTagLength;
+          const contentEnd = trimmedText.length - expectedClosingTag.length;
+          const innerContent = trimmedText.substring(contentStart, contentEnd);
+
+          // Recursively remove any nested full wrapper tags
+          return this.removeFullWrapperTags(innerContent);
+        }
+
+        // Parse and render text with HTML elements and typewriter effect
+        renderTextWithTypewriter(text, container) {
+          const parts = this.parseTextAndHTML(text);
+          let currentIndex = 0;
+
+          const renderNext = () => {
+            if (currentIndex >= parts.length) {
+              this.isRendering = false;
+              return;
+            }
+
+            const part = parts[currentIndex];
+
+            if (part.type === "html") {
+              setTimeout(() => {
+                // Create and append HTML element without affecting existing content
+                const tempDiv = document.createElement("div");
+                tempDiv.innerHTML = part.content;
+                while (tempDiv.firstChild) {
+                  container.appendChild(tempDiv.firstChild);
+                }
+                currentIndex++;
+                renderNext();
+              }, 400);
+            } else {
+              // Render text character by character
+              this.renderTextCharacterByCharacter(
+                part.content,
+                container,
+                () => {
+                  currentIndex++;
+                  renderNext();
+                }
+              );
+            }
+          };
+
+          renderNext();
+        }
+
+        // Parse text to separate HTML elements from plain text
+        parseTextAndHTML(text) {
+          const parts = [];
+          let currentIndex = 0;
+
+          while (currentIndex < text.length) {
+            const htmlStart = text.indexOf("<", currentIndex);
+
+            if (htmlStart === -1) {
+              // No more HTML tags, add remaining text
+              if (currentIndex < text.length) {
+                text
+                  .substring(currentIndex)
+                  .split("")
+                  .forEach((char) => {
+                    parts.push({
+                      type: "text",
+                      content: char,
+                    });
+                  });
+              }
+              break;
+            }
+
+            // Add text before HTML tag
+            if (htmlStart > currentIndex) {
+              const textBeforeHtml = text.substring(currentIndex, htmlStart);
+              textBeforeHtml.split("").forEach((char) => {
+                parts.push({
+                  type: "text",
+                  content: char,
+                });
+              });
+            }
+
+            // Try to find a complete HTML element
+            const htmlElement = this.findCompleteHTMLElement(text, htmlStart);
+
+            if (htmlElement) {
+              // Found a complete HTML element
+              parts.push({
+                type: "html",
+                content: htmlElement.content,
+              });
+              currentIndex = htmlElement.endIndex;
+            } else {
+              // No complete HTML element found, treat as text
+              const nextAngleBracket = text.indexOf("<", htmlStart + 1);
+              const endIndex =
+                nextAngleBracket === -1 ? text.length : nextAngleBracket;
+
+              text
+                .substring(htmlStart, endIndex)
+                .split("")
+                .forEach((char) => {
+                  parts.push({
+                    type: "text",
+                    content: char,
+                  });
+                });
+              currentIndex = endIndex;
+            }
+          }
+
+          return parts;
+        }
+
+        // Find a complete HTML element starting at the given index
+        findCompleteHTMLElement(text, startIndex) {
+          const openTagMatch = text
+            .substring(startIndex)
+            .match(/^<(\w+)(?:\s[^>]*)?>/);
+
+          if (!openTagMatch) {
+            return null; // Not a valid opening tag
+          }
+
+          const tagName = openTagMatch[1];
+          const openTagLength = openTagMatch[0].length;
+          const openTagEnd = startIndex + openTagLength;
+
+          // Check if this is a self-closing tag
+          if (openTagMatch[0].endsWith("/>")) {
+            return {
+              content: text.substring(startIndex, openTagEnd),
+              endIndex: openTagEnd,
+            };
+          }
+
+          // Look for the corresponding closing tag
+          const closeTagPattern = new RegExp(`</${tagName}>`, "g");
+          closeTagPattern.lastIndex = openTagEnd;
+          const closeTagMatch = closeTagPattern.exec(text);
+
+          if (!closeTagMatch) {
+            return null; // No closing tag found
+          }
+
+          const closeTagEnd = closeTagMatch.index + closeTagMatch[0].length;
+
+          return {
+            content: text.substring(startIndex, closeTagEnd),
+            endIndex: closeTagEnd,
+          };
+        }
+
+        // Render text character by character with typewriter effect
+        renderTextCharacterByCharacter(text, container, onComplete) {
+          let charIndex = 0;
+
+          // Create a text node to append characters to
+          const textNode = document.createTextNode("");
+          container.appendChild(textNode);
+
+          const addNextChar = () => {
+            if (charIndex >= text.length) {
+              onComplete();
+              return;
+            }
+
+            textNode.textContent += text[charIndex];
+            charIndex++;
+
+            setTimeout(addNextChar, this.typewriterSpeed);
+          };
+
+          addNextChar();
+        }
+
+        clearResponse() {
+          const responseContainer =
+            document.getElementById("responseContainer");
+          const chartContainer = document.getElementById("chartContainer");
+          const statusSection = document.querySelector(".status-section");
+          const summarySection = document.getElementById("summarySection");
+
+          // Reset state
+          this.accumulatedText = "";
+          this.isRendering = false;
+
+          // Reset UI state
+          responseContainer.innerHTML = "";
+          responseContainer.classList.add("empty");
+          responseContainer.classList.remove("active");
+          chartContainer.style.display = "none";
+          chartContainer.innerHTML = "";
+
+          // Show status section, hide summary section
+          statusSection.style.display = "flex";
+          summarySection.classList.remove("show");
+        }
+
+        showError(message) {
+          const errorMessage = document.getElementById("errorMessage");
+          const statusSection = document.querySelector(".status-section");
+
+          errorMessage.innerHTML = `
+        <div class="icon"><i class="fas fa-exclamation-triangle"></i></div>
+        <span>Error: ${message}</span>
+      `;
+          errorMessage.style.display = "flex";
+
+          // Hide status section and show summary section with error
+          statusSection.style.display = "none";
+        }
+
+        hideError() {
+          const errorMessage = document.getElementById("errorMessage");
+          errorMessage.style.display = "none";
+        }
+      }
+    </script>
+    
+
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      :root {
+        --primary-color: #2563eb;
+        --primary-dark: #1d4ed8;
+        --secondary-color: #f8fafc;
+        --accent-color: #10b981;
+        --warning-color: #f59e0b;
+        --error-color: #ef4444;
+        --text-primary: #1e293b;
+        --text-secondary: #64748b;
+        --text-muted: #94a3b8;
+        --border-color: #e2e8f0;
+        --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+        --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1),
+          0 2px 4px -2px rgb(0 0 0 / 0.1);
+        --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1),
+          0 4px 6px -4px rgb(0 0 0 / 0.1);
+        --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1),
+          0 8px 10px -6px rgb(0 0 0 / 0.1);
+        --radius-sm: 6px;
+        --radius-md: 8px;
+        --radius-lg: 12px;
+        --radius-xl: 16px;
+      }
+
+      body {
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, sans-serif;
+        background: linear-gradient(135deg, #f1f5f9 0%, #e2e8f0 100%);
+        color: var(--text-primary);
+        line-height: 1.6;
+        min-height: 100vh;
+      }
+
+      .main-container {
+        width: 100%;
+        padding: 2rem 3rem;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        gap: 2rem;
+      }
+
+      .summary-section {
+        background: transparent;
+        border-radius: 0;
+        box-shadow: none;
+        overflow: visible;
+        border: none;
+        display: none;
+        animation: fadeInUp 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+      }
+
+      .summary-section.show {
+        display: block;
+      }
+
+      @keyframes fadeInUp {
+        from {
+          opacity: 0;
+          transform: translateY(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .summary-content {
+        padding: 0;
+      }
+
+      .status-section {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 200px;
+      }
+
+      .status-indicator {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 1rem 1.25rem;
+        margin-bottom: 1.5rem;
+        border-radius: var(--radius-lg);
+        font-weight: 500;
+        font-size: 0.95rem;
+        border: 1px solid transparent;
+        transition: all 0.3s ease;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .status-indicator::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          rgba(255, 255, 255, 0.4),
+          transparent
+        );
+        transition: left 1.5s ease;
+      }
+
+      .status-indicator.active::before {
+        left: 100%;
+      }
+
+      .status-indicator .icon {
+        font-size: 1.1rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        height: 20px;
+      }
+
+      .status-indicator.loading {
+        background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+        color: #1e40af;
+        border-color: #93c5fd;
+      }
+
+      .status-indicator.analyzing {
+        background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+        color: #92400e;
+        border-color: #fbbf24;
+      }
+
+      .status-indicator.querying {
+        background: linear-gradient(135deg, #e0f2fe 0%, #b3e5fc 100%);
+        color: #0277bd;
+        border-color: #4fc3f7;
+      }
+
+      .status-indicator.summarizing {
+        background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+        color: #065f46;
+        border-color: #34d399;
+      }
+
+      .status-indicator.generating-chart {
+        background: linear-gradient(135deg, #fce7f3 0%, #fbcfe8 100%);
+        color: #be185d;
+        border-color: #f472b6;
+      }
+
+      .status-indicator.cannot-answer {
+        background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+        color: #dc2626;
+        border-color: #f87171;
+      }
+
+      .status-indicator.completed {
+        background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+        color: #065f46;
+        border-color: #34d399;
+      }
+
+      @keyframes spin {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.7;
+        }
+      }
+
+      .response-container {
+        /* min-height: 250px; */
+        background: linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+        border: none;
+        border-radius: var(--radius-xl);
+        padding: 2.5rem;
+        font-size: 1.1rem;
+        line-height: 1.8;
+        box-shadow: var(--shadow-xl);
+        position: relative;
+        overflow: hidden;
+        color: var(--text-primary);
+        font-weight: 400;
+      }
+
+      .response-container::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 4px;
+        background: linear-gradient(
+          90deg,
+          var(--primary-color) 0%,
+          var(--accent-color) 50%,
+          #8b5cf6 100%
+        );
+        transform: scaleX(0);
+        transform-origin: left;
+        transition: transform 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      .response-container.active::before {
+        transform: scaleX(1);
+      }
+
+      .response-container::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: radial-gradient(
+            circle at 20% 80%,
+            rgba(37, 99, 235, 0.03) 0%,
+            transparent 50%
+          ),
+          radial-gradient(
+            circle at 80% 20%,
+            rgba(16, 185, 129, 0.03) 0%,
+            transparent 50%
+          );
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      .response-container > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      .response-container .store-name {
+        background: rgba(37, 99, 235, 0.08);
+        color: var(--primary-dark);
+        padding: 0.25rem 0.6rem;
+        border-radius: var(--radius-md);
+        font-weight: 500;
+        font-size: 0.93rem;
+        display: inline-block;
+        margin: 0.15rem 0.2rem 0.15rem 0;
+        box-shadow: none;
+        border: 1px solid var(--border-color);
+        transition: background 0.2s, color 0.2s;
+      }
+
+      .response-container .store-name:hover {
+        background: rgba(37, 99, 235, 0.13);
+        color: var(--primary-color);
+      }
+
+      .response-container .metric-name {
+        background: rgba(16, 185, 129, 0.08);
+        color: #059669;
+        padding: 0.18rem 0.5rem;
+        border-radius: var(--radius-sm);
+        font-weight: 400;
+        font-size: 0.89rem;
+        display: inline-block;
+        margin: 0.12rem 0.18rem 0.12rem 0;
+        box-shadow: none;
+        border: 1px solid var(--border-color);
+        transition: background 0.2s, color 0.2s;
+      }
+
+      .response-container .metric-name:hover {
+        background: rgba(16, 185, 129, 0.15);
+        color: var(--accent-color);
+      }
+
+      .response-container.empty {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-muted);
+        font-style: italic;
+        font-size: 1rem;
+      }
+
+      .response-container.empty::after {
+        content: "Waiting for analysis...";
+      }
+
+      /* Typography improvements for summary content */
+      .response-container p {
+        margin-bottom: 1.2rem;
+        font-size: 1.1rem;
+      }
+
+      .response-container h3 {
+        color: var(--text-primary);
+        font-size: 1.3rem;
+        font-weight: 600;
+        margin: 1.5rem 0 0.8rem 0;
+      }
+
+      .response-container ul,
+      .response-container ol {
+        margin: 1rem 0;
+        padding-left: 1.5rem;
+      }
+
+      .response-container li {
+        margin-bottom: 0.5rem;
+        font-size: 1.05rem;
+      }
+
+      .response-container strong {
+        color: var(--text-primary);
+        font-weight: 600;
+      }
+
+      .chart-container {
+        margin-top: 1rem;
+        padding: 1rem;
+        border: 1px solid var(--border-color);
+        border-radius: var(--radius-lg);
+        background: white;
+        box-shadow: var(--shadow-sm);
+      }
+
+      .error-message {
+        color: var(--error-color);
+        background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+        border: 1px solid #f87171;
+        padding: 1rem;
+        border-radius: var(--radius-lg);
+        margin-top: 1rem;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        font-weight: 500;
+      }
+
+      .error-message .icon {
+        font-size: 1.2rem;
+        color: var(--error-color);
+      }
+
+      .dashboard-section {
+        background: white;
+        border-radius: var(--radius-xl);
+        box-shadow: var(--shadow-lg);
+        overflow: hidden;
+        border: 1px solid var(--border-color);
+        flex: 1 1 0; 
+        min-height: 600px; 
+        display: flex; 
+        flex-direction: column;
+      }
+
+      .dashboard-header {
+        background: var(--secondary-color);
+        padding: 1.5rem 2rem;
+        border-bottom: 1px solid var(--border-color);
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      .dashboard-header h2 {
+        font-size: 1.5rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        margin: 0;
+      }
+
+      .dashboard-header .icon {
+        color: var(--primary-color);
+        font-size: 1.5rem;
+      }
+
+      .dashboard-content {
+        padding: 0;
+        flex: 1 1 0; 
+        min-height: 0; 
+        overflow: auto;
+      }
+
+      /* Responsive Design */
+      @media (max-width: 768px) {
+        .main-container {
+          padding: 1.5rem 2rem;
+          gap: 1.5rem;
+        }
+
+        .summary-content {
+          padding: 2rem;
+        }
+
+        .dashboard-header {
+          padding: 1rem 1.5rem;
+        }
+
+        .dashboard-header h2 {
+          font-size: 1.25rem;
+        }
+      }
+
+      @media (max-width: 480px) {
+        .main-container {
+          padding: 1rem 1.5rem;
+        }
+
+        .summary-content {
+          padding: 1.5rem;
+        }
+
+        .status-indicator {
+          padding: 0.75rem 1rem;
+          font-size: 0.9rem;
+        }
+
+        .response-container {
+          padding: 1rem;
+          font-size: 0.95rem;
+        }
+      }
+    </style>
+  </body>
+</html>
