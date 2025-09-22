@@ -103,15 +103,12 @@
               
         **Metrics to surface per store**
         - **'Total Revenue'** - Use the "total_amount" column ID.
-        - **'Profit Margin'** - Use the "Profit Margin" Formula ID.
         - **'Most popular product per store'** - Use the "product_name" column ID, "store_name" column ID, and the "quantity" column ID. You must run this as a separate query with the same date range filter applied.
               
         **Other rules:**
         - Where relevant, always retrieve names instead of IDs in the data queries (e.g. query "product_name" column ID instead of "product_id", "store_name" column ID instead of "store_id", etc.).
         - Add a short introduction at the beginning of the output (e.g. "here is a quick overview of your stores' performance"). Include the date range.
         - Keep the tone business-critical and actionable.
-        - Around store names, use a span HTML tag with the "store-name" HTML class.
-        - Around metric names, use a span HTML tag with the "metric-name" HTML class.
         - Do not ask for confirmation or clarification. If an issue occurs, just indicate that an unexpected error occurred while generating the summary.
         - Use the € currency symbol where appropriate.`;
 
