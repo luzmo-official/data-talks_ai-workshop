@@ -1,0 +1,23 @@
+POST https://api.luzmo.com/0.1.0/authorization
+{
+  "action": "create",
+  "key": "{{YOUR_API_KEY}}",
+  "token": "{{YOUR_API_TOKEN}}",
+  "version": "0.1.0",
+  "properties": {
+    "type": "embed",
+    "expiry": "2025-09-30T23:59:59.999Z",
+    "username": "luzmo-iq-embed@example.com",
+    "name": "Embed Luzmo IQ Test User",
+    "suborganization": "Luzmo Workshop",
+    "email": "luzmo-iq-embed@example.com",
+    "access": {
+      "datasets": [
+        {
+          "id": "{{YOUR_DATASET_ID}}",
+          "rights": "use"
+        }
+      ]
+    }
+  }
+}
